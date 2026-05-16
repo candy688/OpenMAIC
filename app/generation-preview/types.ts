@@ -20,6 +20,7 @@ export interface GenerationSessionState {
   previewPhase?: 'preparing' | 'outline-ready' | 'review' | 'generating-content';
   // PDF deferred parsing fields
   pdfStorageKey?: string;
+  pdfBlobUrl?: string;
   pdfFileName?: string;
   pdfProviderId?: string;
   pdfProviderConfig?: { apiKey?: string; baseUrl?: string };
@@ -85,7 +86,7 @@ export const ALL_STEPS: GenerationStep[] = [
 
 export const getActiveSteps = (session: GenerationSessionState | null) => {
   return ALL_STEPS.filter((step) => {
-    if (step.id === 'pdf-analysis') return !!session?.pdfStorageKey;
+    if (step.id === 'pdf-analysis') return !!session?.pdfStorageKey || !!session?.pdfBlobUrl;
     if (step.id === 'web-search') return !!session?.requirements?.webSearch;
     if (step.id === 'agent-generation') return useSettingsStore.getState().agentMode === 'auto';
     return true;

@@ -235,7 +235,8 @@ function GenerationPreviewContent() {
       let activeSteps = getActiveSteps(currentSession);
 
       // Determine if we need the PDF analysis step
-      const hasPdfToAnalyze = !!currentSession.pdfStorageKey && !currentSession.pdfText;
+      const hasPdfToAnalyze =
+        (!!currentSession.pdfStorageKey || !!currentSession.pdfBlobUrl) && !currentSession.pdfText;
       // If no PDF to analyze, skip to the next available step
       if (!hasPdfToAnalyze) {
         const firstNonPdfIdx = activeSteps.findIndex((s) => s.id !== 'pdf-analysis');
@@ -245,43 +246,58 @@ function GenerationPreviewContent() {
       // Step 0: Parse PDF if needed
       if (hasPdfToAnalyze) {
         log.debug('=== Generation Preview: Parsing PDF ===');
-        const pdfBlob = await loadPdfBlob(currentSession.pdfStorageKey!);
-        if (!pdfBlob) {
-          throw new Error(t('generation.pdfLoadFailed'));
-        }
+        let parseResponse: Response;
 
-        // Ensure pdfBlob is a valid Blob with content
-        if (!(pdfBlob instanceof Blob) || pdfBlob.size === 0) {
-          log.error('Invalid PDF blob:', {
-            type: typeof pdfBlob,
-            size: pdfBlob instanceof Blob ? pdfBlob.size : 'N/A',
+        if (currentSession.pdfBlobUrl) {
+          parseResponse = await fetch('/api/parse-pdf', {
+            method: 'POST',
+            headers: getApiHeaders(),
+            body: JSON.stringify({
+              blobUrl: currentSession.pdfBlobUrl,
+              fileName: currentSession.pdfFileName,
+              providerId: currentSession.pdfProviderId,
+              apiKey: currentSession.pdfProviderConfig?.apiKey,
+              baseUrl: currentSession.pdfProviderConfig?.baseUrl,
+            }),
+            signal,
           });
-          throw new Error(t('generation.pdfLoadFailed'));
-        }
+        } else {
+          const pdfBlob = await loadPdfBlob(currentSession.pdfStorageKey!);
+          if (!pdfBlob) {
+            throw new Error(t('generation.pdfLoadFailed'));
+          }
 
-        // Wrap as a File to guarantee multipart/form-data with correct content-type
-        const pdfFile = new File([pdfBlob], currentSession.pdfFileName || 'document.pdf', {
-          type: 'application/pdf',
-        });
+          if (!(pdfBlob instanceof Blob) || pdfBlob.size === 0) {
+            log.error('Invalid PDF blob:', {
+              type: typeof pdfBlob,
+              size: pdfBlob instanceof Blob ? pdfBlob.size : 'N/A',
+            });
+            throw new Error(t('generation.pdfLoadFailed'));
+          }
 
-        const parseFormData = new FormData();
-        parseFormData.append('pdf', pdfFile);
+          const pdfFile = new File([pdfBlob], currentSession.pdfFileName || 'document.pdf', {
+            type: 'application/pdf',
+          });
 
-        if (currentSession.pdfProviderId) {
-          parseFormData.append('providerId', currentSession.pdfProviderId);
-        }
-        if (currentSession.pdfProviderConfig?.apiKey?.trim()) {
-          parseFormData.append('apiKey', currentSession.pdfProviderConfig.apiKey);
-        }
-        if (currentSession.pdfProviderConfig?.baseUrl?.trim()) {
-          parseFormData.append('baseUrl', currentSession.pdfProviderConfig.baseUrl);
-        }
+          const parseFormData = new FormData();
+          parseFormData.append('pdf', pdfFile);
 
-        const parseResponse = await fetch('/api/parse-pdf', {
-          method: 'POST',
-          body: parseFormData,
-          signal,
-        });
+          if (currentSession.pdfProviderId) {
+            parseFormData.append('providerId', currentSession.pdfProviderId);
+          }
+          if (currentSession.pdfProviderConfig?.apiKey?.trim()) {
+            parseFormData.append('apiKey', currentSession.pdfProviderConfig.apiKey);
+          }
+          if (currentSession.pdfProviderConfig?.baseUrl?.trim()) {
+            parseFormData.append('baseUrl', currentSession.pdfProviderConfig.baseUrl);
+          }
+
+          parseResponse = await fetch('/api/parse-pdf', {
+            method: 'POST',
+            body: parseFormData,
+            signal,
+          });
+        }
 
         if (!parseResponse.ok) {
           const errorMessage = await readApiErrorMessage(
@@ -378,6 +394,7 @@ function GenerationPreviewContent() {
           pdfImages,
           imageStorageIds,
           pdfStorageKey: undefined, // Clear so we don't re-parse
+          pdfBlobUrl: undefined,
         };
         setSession(updatedSession);
         sessionStorage.setItem('generationSession', JSON.stringify(updatedSession));

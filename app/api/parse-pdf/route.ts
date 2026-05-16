@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { del, get } from '@vercel/blob';
 import { parsePDF } from '@/lib/pdf/pdf-providers';
 import { resolvePDFApiKey, resolvePDFBaseUrl } from '@/lib/server/provider-config';
 import type { PDFProviderId } from '@/lib/pdf/types';
@@ -6,35 +7,83 @@ import type { ParsedPdfContent } from '@/lib/types/pdf';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
+import { isAllowedPdfBlobUrl, PDF_BLOB_ACCESS } from '@/lib/constants/upload';
+
 const log = createLogger('Parse PDF');
+
+interface BlobPdfParseRequest {
+  blobUrl?: string;
+  fileName?: string;
+  providerId?: PDFProviderId | null;
+  apiKey?: string | null;
+  baseUrl?: string | null;
+}
 
 export async function POST(req: NextRequest) {
   let pdfFileName: string | undefined;
   let resolvedProviderId: string | undefined;
+  let uploadedBlobUrl: string | undefined;
   try {
     const contentType = req.headers.get('content-type') || '';
-    if (!contentType.includes('multipart/form-data')) {
+    let providerId: PDFProviderId | null = null;
+    let apiKey: string | null = null;
+    let baseUrl: string | null = null;
+    let buffer: Buffer;
+    let fileSize = 0;
+
+    if (contentType.includes('multipart/form-data')) {
+      const formData = await req.formData();
+      const pdfFile = formData.get('pdf') as File | null;
+      providerId = formData.get('providerId') as PDFProviderId | null;
+      apiKey = formData.get('apiKey') as string | null;
+      baseUrl = formData.get('baseUrl') as string | null;
+
+      if (!pdfFile) {
+        return apiError('MISSING_REQUIRED_FIELD', 400, 'No PDF file provided');
+      }
+
+      pdfFileName = pdfFile.name;
+      fileSize = pdfFile.size;
+
+      const arrayBuffer = await pdfFile.arrayBuffer();
+      buffer = Buffer.from(arrayBuffer);
+    } else if (contentType.includes('application/json')) {
+      const body = (await req.json()) as BlobPdfParseRequest;
+      const blobUrl = body.blobUrl?.trim();
+
+      if (!blobUrl) {
+        return apiError('MISSING_REQUIRED_FIELD', 400, 'No PDF blob URL provided');
+      }
+
+      if (!isAllowedPdfBlobUrl(blobUrl)) {
+        return apiError('INVALID_REQUEST', 400, 'Invalid PDF blob URL');
+      }
+
+      const blobResult = await get(blobUrl, { access: PDF_BLOB_ACCESS });
+      if (!blobResult || blobResult.statusCode !== 200 || !blobResult.stream) {
+        return apiError('INVALID_REQUEST', 404, 'Uploaded PDF not found');
+      }
+
+      providerId = body.providerId ?? null;
+      apiKey = body.apiKey ?? null;
+      baseUrl = body.baseUrl ?? null;
+      pdfFileName = body.fileName || 'document.pdf';
+      uploadedBlobUrl = blobUrl;
+      fileSize = blobResult.blob.size;
+
+      const arrayBuffer = await new Response(blobResult.stream).arrayBuffer();
+      buffer = Buffer.from(arrayBuffer);
+    } else {
       log.error('Invalid Content-Type for PDF upload:', contentType);
       return apiError(
         'INVALID_REQUEST',
         400,
-        `Invalid Content-Type: expected multipart/form-data, got "${contentType}"`,
+        `Invalid Content-Type: expected multipart/form-data or application/json, got "${contentType}"`,
       );
-    }
-
-    const formData = await req.formData();
-    const pdfFile = formData.get('pdf') as File | null;
-    const providerId = formData.get('providerId') as PDFProviderId | null;
-    const apiKey = formData.get('apiKey') as string | null;
-    const baseUrl = formData.get('baseUrl') as string | null;
-
-    if (!pdfFile) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'No PDF file provided');
     }
 
     // providerId is required from the client — no server-side store to fall back to
     const effectiveProviderId = providerId || ('unpdf' as PDFProviderId);
-    pdfFileName = pdfFile?.name;
     resolvedProviderId = effectiveProviderId;
 
     const clientBaseUrl = baseUrl || undefined;
@@ -55,10 +104,6 @@ export async function POST(req: NextRequest) {
         : resolvePDFBaseUrl(effectiveProviderId, baseUrl || undefined),
     };
 
-    // Convert PDF to buffer
-    const arrayBuffer = await pdfFile.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
     // Parse PDF using the provider system
     const result = await parsePDF(config, buffer);
 
@@ -68,10 +113,18 @@ export async function POST(req: NextRequest) {
       metadata: {
         ...result.metadata,
         pageCount: result.metadata?.pageCount ?? 0, // Ensure pageCount is always a number
-        fileName: pdfFile.name,
-        fileSize: pdfFile.size,
+        fileName: pdfFileName ?? 'document.pdf',
+        fileSize,
       },
     };
+
+    if (uploadedBlobUrl) {
+      try {
+        await del(uploadedBlobUrl);
+      } catch (cleanupError) {
+        log.error(`Failed to delete uploaded PDF blob "${uploadedBlobUrl}":`, cleanupError);
+      }
+    }
 
     return apiSuccess({ data: resultWithMetadata });
   } catch (error) {

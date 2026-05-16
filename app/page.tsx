@@ -39,6 +39,8 @@ import { nanoid } from 'nanoid';
 import { storePdfBlob } from '@/lib/utils/image-storage';
 import type { UserRequirements } from '@/lib/types/generation';
 import { useSettingsStore } from '@/lib/store/settings';
+import { shouldUseDirectPdfUpload } from '@/lib/constants/upload';
+import { uploadPdfToBlob } from '@/lib/pdf/client-upload';
 import { useUserProfileStore, AVATAR_OPTIONS } from '@/lib/store/user-profile';
 import {
   StageListItem,
@@ -143,6 +145,8 @@ function HomePage() {
 
   const [themeOpen, setThemeOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isPreparingGeneration, setIsPreparingGeneration] = useState(false);
+  const [pdfUploadProgress, setPdfUploadProgress] = useState<number | null>(null);
   const [classrooms, setClassrooms] = useState<StageListItem[]>([]);
   const [thumbnails, setThumbnails] = useState<Record<string, Slide>>({});
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -291,6 +295,8 @@ function HomePage() {
   };
 
   const handleGenerate = async () => {
+    if (isPreparingGeneration) return;
+
     // Validate setup before proceeding
     if (!currentModelId) {
       showSetupToast(
@@ -308,8 +314,11 @@ function HomePage() {
     }
 
     setError(null);
+    setIsPreparingGeneration(true);
+    setPdfUploadProgress(null);
 
     try {
+      const sessionId = nanoid();
       const userProfile = useUserProfileStore.getState();
       const requirements: UserRequirements = {
         requirement: form.requirement,
@@ -320,13 +329,27 @@ function HomePage() {
       };
 
       let pdfStorageKey: string | undefined;
+      let pdfBlobUrl: string | undefined;
       let pdfFileName: string | undefined;
       let pdfProviderId: string | undefined;
       let pdfProviderConfig: { apiKey?: string; baseUrl?: string } | undefined;
 
       if (form.pdfFile) {
-        pdfStorageKey = await storePdfBlob(form.pdfFile);
         pdfFileName = form.pdfFile.name;
+
+        if (shouldUseDirectPdfUpload(form.pdfFile.size)) {
+          setPdfUploadProgress(0);
+          try {
+            const uploadedPdf = await uploadPdfToBlob(form.pdfFile, sessionId, ({ percentage }) => {
+              setPdfUploadProgress(Math.round(percentage));
+            });
+            pdfBlobUrl = uploadedPdf.url;
+          } catch {
+            throw new Error(t('upload.pdfUploadFailed'));
+          }
+        } else {
+          pdfStorageKey = await storePdfBlob(form.pdfFile);
+        }
 
         const settings = useSettingsStore.getState();
         pdfProviderId = settings.pdfProviderId;
@@ -340,12 +363,13 @@ function HomePage() {
       }
 
       const sessionState = {
-        sessionId: nanoid(),
+        sessionId,
         requirements,
         pdfText: '',
         pdfImages: [],
         imageStorageIds: [],
         pdfStorageKey,
+        pdfBlobUrl,
         pdfFileName,
         pdfProviderId,
         pdfProviderConfig,
@@ -358,6 +382,9 @@ function HomePage() {
     } catch (err) {
       log.error('Error preparing generation:', err);
       setError(err instanceof Error ? err.message : t('upload.generateFailed'));
+    } finally {
+      setIsPreparingGeneration(false);
+      setPdfUploadProgress(null);
     }
   };
 
@@ -373,7 +400,7 @@ function HomePage() {
     return date.toLocaleDateString();
   };
 
-  const canGenerate = !!form.requirement.trim();
+  const canGenerate = !!form.requirement.trim() && !isPreparingGeneration;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -626,7 +653,13 @@ function HomePage() {
                     : 'bg-muted text-muted-foreground/40 cursor-not-allowed',
                 )}
               >
-                <span className="text-xs font-medium">{t('toolbar.enterClassroom')}</span>
+                <span className="text-xs font-medium">
+                  {isPreparingGeneration
+                    ? pdfUploadProgress !== null
+                      ? t('upload.uploadingPdf', { progress: pdfUploadProgress })
+                      : t('generation.openingClassroom')
+                    : t('toolbar.enterClassroom')}
+                </span>
                 <ArrowUp className="size-3.5" />
               </button>
             </div>
