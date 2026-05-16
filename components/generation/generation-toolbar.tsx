@@ -17,6 +17,7 @@ import { useI18n } from '@/lib/hooks/use-i18n';
 import { useSettingsStore } from '@/lib/store/settings';
 import { PDF_PROVIDERS } from '@/lib/pdf/constants';
 import type { PDFProviderId } from '@/lib/pdf/types';
+import { MAX_PDF_SIZE_BYTES, MAX_PDF_SIZE_MB } from '@/lib/constants/upload';
 import { WEB_SEARCH_PROVIDERS, getWebSearchProviderDisplayName } from '@/lib/web-search/constants';
 import type { WebSearchProviderId } from '@/lib/web-search/types';
 import type { ProviderId } from '@/lib/ai/providers';
@@ -35,10 +36,6 @@ import {
 } from '@/lib/ai/thinking-config';
 import type { SettingsSection } from '@/lib/types/settings';
 import { MediaPopover } from '@/components/generation/media-popover';
-
-// ─── Constants ───────────────────────────────────────────────
-const MAX_PDF_SIZE_MB = 50;
-const MAX_PDF_SIZE_BYTES = MAX_PDF_SIZE_MB * 1024 * 1024;
 
 // ─── Types ───────────────────────────────────────────────────
 export interface GenerationToolbarProps {
@@ -120,7 +117,7 @@ export function GenerationToolbar({
   const handleFileSelect = (file: File) => {
     if (file.type !== 'application/pdf') return;
     if (file.size > MAX_PDF_SIZE_BYTES) {
-      onPdfError(t('upload.fileTooLarge'));
+      onPdfError(t('upload.fileTooLarge', { size: MAX_PDF_SIZE_MB }));
       return;
     }
     onPdfError(null);
@@ -294,7 +291,7 @@ export function GenerationToolbar({
                   <Paperclip className="size-5 text-muted-foreground/50 mb-1.5" />
                   <p className="text-xs font-medium">{t('toolbar.pdfUpload')}</p>
                   <p className="text-[10px] text-muted-foreground/60 mt-0.5">
-                    {t('upload.pdfSizeLimit')}
+                    {t('upload.pdfSizeLimit', { size: MAX_PDF_SIZE_MB })}
                   </p>
                 </div>
               )}

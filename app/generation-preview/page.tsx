@@ -15,18 +15,20 @@ import { useAgentRegistry } from '@/lib/orchestration/registry/store';
 import { getAvailableProvidersWithVoices } from '@/lib/audio/voice-resolver';
 import { getVoxCPMProviderOptions, useVoxCPMVoiceProfiles } from '@/lib/audio/voxcpm-voices';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { MAX_PDF_SIZE_MB } from '@/lib/constants/upload';
 import {
   loadImageMapping,
   loadPdfBlob,
   cleanupOldImages,
   storeImages,
 } from '@/lib/utils/image-storage';
+import { readApiErrorMessage, readApiJson } from '@/lib/utils/client-api';
 import { getCurrentModelConfig } from '@/lib/utils/model-config';
 import { db } from '@/lib/utils/database';
 import { MAX_PDF_CONTENT_CHARS, MAX_VISION_IMAGES } from '@/lib/constants/generation';
 import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
 import { nanoid } from 'nanoid';
-import type { Stage } from '@/lib/types/stage';
+import type { Scene, Stage } from '@/lib/types/stage';
 import type { SceneOutline, PdfImage, ImageMapping } from '@/lib/types/generation';
 import { AgentRevealModal } from '@/components/agent/agent-reveal-modal';
 import { createLogger } from '@/lib/logger';
@@ -282,11 +284,31 @@ function GenerationPreviewContent() {
         });
 
         if (!parseResponse.ok) {
-          const errorData = await parseResponse.json();
-          throw new Error(errorData.error || t('generation.pdfParseFailed'));
+          const errorMessage = await readApiErrorMessage(
+            parseResponse,
+            t('generation.pdfParseFailed'),
+            { payloadTooLargeMessage: t('upload.fileTooLarge', { size: MAX_PDF_SIZE_MB }) },
+          );
+          throw new Error(errorMessage);
         }
 
-        const parseResult = await parseResponse.json();
+        const parseResult = await readApiJson<{
+          success?: boolean;
+          data?: {
+            text: string;
+            images: string[];
+            metadata?: {
+              pdfImages?: Array<{
+                id: string;
+                src?: string;
+                pageNumber?: number;
+                description?: string;
+                width?: number;
+                height?: number;
+              }>;
+            };
+          };
+        }>(parseResponse, t('generation.pdfParseFailed'));
         if (!parseResult.success || !parseResult.data) {
           throw new Error(t('generation.pdfParseFailed'));
         }
@@ -486,9 +508,11 @@ function GenerationPreviewContent() {
           })
             .then((res) => {
               if (!res.ok) {
-                return res.json().then((d) => {
-                  reject(new Error(d.error || t('generation.outlineGenerateFailed')));
-                });
+                return readApiErrorMessage(res, t('generation.outlineGenerateFailed')).then(
+                  (message) => {
+                    reject(new Error(message));
+                  },
+                );
               }
 
               const reader = res.body?.getReader();
@@ -708,8 +732,22 @@ function GenerationPreviewContent() {
             signal,
           });
 
-          if (!agentResp.ok) throw new Error('Agent generation failed');
-          const agentData = await agentResp.json();
+          if (!agentResp.ok) {
+            throw new Error(await readApiErrorMessage(agentResp, 'Agent generation failed'));
+          }
+          const agentData = await readApiJson<{
+            success?: boolean;
+            error?: string;
+            agents: Array<{
+              id: string;
+              name: string;
+              role: string;
+              persona: string;
+              avatar: string;
+              color: string;
+              priority: number;
+            }>;
+          }>(agentResp, 'Agent generation failed');
           if (!agentData.success) throw new Error(agentData.error || 'Agent generation failed');
 
           // Save to IndexedDB and registry
@@ -825,11 +863,15 @@ function GenerationPreviewContent() {
       });
 
       if (!contentResp.ok) {
-        const errorData = await contentResp.json().catch(() => ({ error: 'Request failed' }));
-        throw new Error(errorData.error || t('generation.sceneGenerateFailed'));
+        throw new Error(await readApiErrorMessage(contentResp, t('generation.sceneGenerateFailed')));
       }
 
-      const contentData = await contentResp.json();
+      const contentData = await readApiJson<{
+        success?: boolean;
+        error?: string;
+        content?: unknown;
+        effectiveOutline?: SceneOutline;
+      }>(contentResp, t('generation.sceneGenerateFailed'));
       if (!contentData.success || !contentData.content) {
         throw new Error(contentData.error || t('generation.sceneGenerateFailed'));
       }
@@ -857,14 +899,18 @@ function GenerationPreviewContent() {
       });
 
       if (!actionsResp.ok) {
-        const errorData = await actionsResp.json().catch(() => ({ error: 'Request failed' }));
-        throw new Error(errorData.error || t('generation.sceneGenerateFailed'));
+        throw new Error(await readApiErrorMessage(actionsResp, t('generation.sceneGenerateFailed')));
       }
 
-      const data = await actionsResp.json();
+      const data = await readApiJson<{
+        success?: boolean;
+        error?: string;
+        scene?: Scene;
+      }>(actionsResp, t('generation.sceneGenerateFailed'));
       if (!data.success || !data.scene) {
         throw new Error(data.error || t('generation.sceneGenerateFailed'));
       }
+      const scene = data.scene;
 
       // Generate TTS for first scene (part of actions step — blocking)
       if (settings.ttsEnabled && settings.ttsProviderId !== 'browser-native-tts') {
@@ -879,20 +925,21 @@ function GenerationPreviewContent() {
                 })),
               }
             : undefined;
-        const speechActions = (data.scene.actions || []).filter(
+        const speechActions = (scene.actions || []).filter(
           (a: { type: string; text?: string }) => a.type === 'speech' && a.text,
         );
 
         let ttsFailCount = 0;
         for (const action of speechActions) {
+          const speechAction = action as typeof action & { audioId?: string; text: string };
           const audioId = `tts_${action.id}`;
-          action.audioId = audioId;
+          speechAction.audioId = audioId;
           try {
             const resp = await fetch('/api/generate/tts', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                text: action.text,
+                text: speechAction.text,
                 audioId,
                 ttsProviderId: settings.ttsProviderId,
                 ttsModelId: ttsProviderConfig?.modelId,
@@ -939,11 +986,11 @@ function GenerationPreviewContent() {
       }
 
       // Add scene to store and navigate
-      store.addScene(data.scene);
-      store.setCurrentSceneId(data.scene.id);
+      store.addScene(scene);
+      store.setCurrentSceneId(scene.id);
 
       // Set remaining outlines as skeleton placeholders
-      const remaining = outlines.filter((o) => o.order !== data.scene.order);
+      const remaining = outlines.filter((o) => o.order !== scene.order);
       store.setGeneratingOutlines(remaining);
 
       // Store generation params for classroom to continue generation
